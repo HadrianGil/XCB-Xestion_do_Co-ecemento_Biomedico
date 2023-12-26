@@ -1,7 +1,6 @@
 import logging
 from elasticsearch import Elasticsearch, helpers
 import os
-import requests
 import pubmed_parser as pp
 import xml.etree.ElementTree as ET
 
@@ -35,6 +34,9 @@ def create_index(es, IndexName):
         },
         "mappings":{
             "properties": {
+                "id":{
+                    "type": "text"
+                },
                 "pmid": {
                     "type": "text"
                 },
@@ -64,14 +66,15 @@ def create_index(es, IndexName):
 
 def generate_action(articulos):
     for articulo in articulos:
-        doc = {
-            'id':articulo['pmid'],
-            "pmid":articulo["pmid"],
-            "title":articulo["title"],
-            "abstract": articulo["abstract"],
-            "mesh_terms": articulo["mesh_terms"]
-        }
-        yield doc
+        if "abstract" in articulo and articulo["abstract"]:
+            doc = {
+                'id':articulo['pmid'],
+                "pmid":articulo["pmid"],
+                "title":articulo["title"],
+                "abstract": articulo["abstract"],
+                "mesh_terms": articulo["mesh_terms"]
+            }
+            yield doc
 
 def search(es, IndexName, query):
     res = es.search(index = IndexName, body = query)  
@@ -81,45 +84,59 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.ERROR)
     es = connect_elasticsearch()
 
-    IndexName = 'PubMedCorpus'
+    IndexName = 'pubmed_corpus'
     create_index(es, IndexName)
 
-    os.chdir("pruebita")
+    os.chdir("Baseline Corpus")
     archivos = os.listdir()
     print(archivos)
    
-    # for archivo in archivos:
-    #     lista = pp.parse_medline_xml(archivo,
-    #                                 year_info_only = False,
-    #                                 nlm_category = False, 
-    #                                 author_list = False,
-    #                                 reference_list = False)
-    #     acciones = generate_action(lista) 
-    #     try:
-    #         helpers.bulk(es, index=IndexName, actions=acciones)
-    #         print(f'{archivo} indexado correctamente')
-    #     except Exception as ex:
-    #         print(f'Error durante la indexación de {archivo}: {str(ex)}')
+    for archivo in archivos:
+        lista = pp.parse_medline_xml(archivo,
+                                    year_info_only = False,
+                                    nlm_category = False, 
+                                    author_list = False,
+                                    reference_list = False)
+        acciones = generate_action(lista) 
+        try:
+            helpers.bulk(es, index=IndexName, actions=acciones)
+            print(f'{archivo} indexado correctamente')
+        except Exception as ex:
+            print(f'Error durante la indexación de {archivo}: {str(ex)}')
     
     os.chdir('..\ ')
     
     # Leemos los topics
     tree = ET.parse('topics2019.xml')
     root = tree.getroot()
-
     for topic in root:
-    query = {
-        "size": 1000,
-        "query": {
-            "bool": {
-                "must": [
-                    {"multi_match": {'query': topic.find('disease').text, "fields": ["title", "abstract", "mesh_terms"]}},
-                    {"multi_match": {'query': topic.find('gene').text, 'fields': ['abstract', 'mesh_terms']}}
-                ],
-                "should": [
-                    {'match': {'mesh_terms': topic.find('demographic').text.split(' ')[1]}}
-                ]
+        numero = topic.attrib.get("number")
+        enfermedad = topic.find('disease').text
+        gen = topic.find('gene').text
+        demografia = topic.find('demographic').text.split(" ")
+        edad = demografia[0]
+        genero = demografia[1]
+        query = {
+            "size": 1000,
+            "query": {
+                "bool": {
+                    "must": [
+                        {"multi_match": {'query': enfermedad, "fields": ["title", "abstract", "mesh_terms"]}},
+                        {"multi_match": {'query': gen, 'fields': ['abstract', 'mesh_terms']}}
+                    ],
+                    "should": [
+                        {'match': {'mesh_terms': genero}}
+                    ]
+                }
             }
         }
-    }
-    resultados = search(es, IndexName=IndexName, query=query)
+        resultados = search(es, IndexName=IndexName, query=query)
+
+        titulo = f'resultados_topic{topic.get("number")}'
+        with open(f'{titulo}.txt','w') as file:
+            file.write('TOPIC_NO Q0 ID RANK SCORE RUN_NAME\n')
+            n = 1
+            for match in resultados['hits']['hits']:
+                file.write(str(topic.attrib.get("number"))+' Q0 ' +match['_source']['pmid']+' '+str(n)+' '+str(match['_score'])+' '+'myrun\n')
+                n += 1
+        print('escrito')
